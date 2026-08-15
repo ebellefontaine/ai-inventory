@@ -28,6 +28,18 @@ func seedOrgAndTeam(t *testing.T, pool *pgxpool.Pool) (orgID, teamID uuid.UUID) 
 	return orgID, teamID
 }
 
+// seedTeam inserts one extra team into an existing organization.
+func seedTeam(t *testing.T, pool *pgxpool.Pool, orgID uuid.UUID, name, slug string) uuid.UUID {
+	t.Helper()
+
+	var id uuid.UUID
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`INSERT INTO teams (org_id, name, slug) VALUES ($1, $2, $3) RETURNING id`,
+		orgID, name, slug,
+	).Scan(&id))
+	return id
+}
+
 // seedAgent registers one agent through the store and returns its id.
 func seedAgent(t *testing.T, pool *pgxpool.Pool, orgID, teamID uuid.UUID, instanceKey string) uuid.UUID {
 	t.Helper()
@@ -126,4 +138,81 @@ func setAgentLifecycle(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, state str
 		`UPDATE agents SET lifecycle_state = $2 WHERE id = $1`, id, state)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, tag.RowsAffected())
+}
+
+// agentEdit is an administrator's correction to one agent. Every non-nil field
+// is written and its column name recorded in human_edited_fields.
+type agentEdit struct {
+	TeamID      *uuid.UUID
+	DisplayName *string
+	Purpose     *string
+}
+
+// humanEdit stands in for the administrator UI, exactly as setAgentLifecycle
+// stands in for the sweeper. The service-layer API for marking fields
+// human-edited arrives with the admin API in Milestone 5; until then the tests
+// write the correction and the human_edited_fields marker directly, because the
+// guarantee under test lives in the storage layer regardless of who sets it.
+func humanEdit(t *testing.T, pool *pgxpool.Pool, id uuid.UUID, edit agentEdit) {
+	t.Helper()
+
+	fields := []string{}
+	if edit.TeamID != nil {
+		fields = append(fields, "team_id")
+	}
+	if edit.DisplayName != nil {
+		fields = append(fields, "display_name")
+	}
+	if edit.Purpose != nil {
+		fields = append(fields, "purpose")
+	}
+
+	// COALESCE leaves a column alone when the edit does not mention it, which
+	// keeps this one statement usable for any subset of fields.
+	tag, err := pool.Exec(context.Background(), `
+		UPDATE agents SET
+		    team_id             = COALESCE($2, team_id),
+		    display_name        = COALESCE($3, display_name),
+		    purpose             = COALESCE($4, purpose),
+		    human_edited_fields = $5
+		WHERE id = $1`,
+		id, edit.TeamID, edit.DisplayName, edit.Purpose, fields)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, tag.RowsAffected())
+}
+
+// agentSnapshot is one agent's stored state: the eight self-reported columns
+// the human-edit guard covers, plus the server-managed columns it must not.
+type agentSnapshot struct {
+	TeamID         *uuid.UUID
+	DisplayName    string
+	Purpose        string
+	Platform       string
+	Hosting        string
+	Source         string
+	Telemetry      string
+	Attributes     string
+	Flags          []string
+	LifecycleState string
+	HumanEdited    []string
+}
+
+// readAgent loads one agent's stored state.
+func readAgent(t *testing.T, pool *pgxpool.Pool, id uuid.UUID) agentSnapshot {
+	t.Helper()
+
+	var s agentSnapshot
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT team_id, display_name, purpose,
+		       platform::text, hosting::text, source::text,
+		       telemetry_links::text, attributes::text,
+		       flags, lifecycle_state, human_edited_fields
+		  FROM agents WHERE id = $1`, id,
+	).Scan(
+		&s.TeamID, &s.DisplayName, &s.Purpose,
+		&s.Platform, &s.Hosting, &s.Source,
+		&s.Telemetry, &s.Attributes,
+		&s.Flags, &s.LifecycleState, &s.HumanEdited,
+	))
+	return s
 }

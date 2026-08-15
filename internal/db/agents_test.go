@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ebellefontaine/ai-inventory/internal/db"
@@ -157,4 +158,186 @@ func TestUpsertAgentRevivesStaleButNotRetired(t *testing.T) {
 				"re-registering a %q agent must leave it %q", tc.start, tc.want)
 		})
 	}
+}
+
+// selfReport is the payload an agent sends on every registration. The tests
+// below re-register with a changed payload and check what survives.
+func selfReport(org, team uuid.UUID, instanceKey string) db.UpsertAgentInput {
+	return db.UpsertAgentInput{
+		OrgID: org, TeamID: team,
+		Environment: "production",
+		InstanceKey: instanceKey,
+		DisplayName: "invoice-triage-7f9c",
+		Purpose:     "Triages AP invoices",
+		Platform:    []byte(`{"framework":"langchain"}`),
+		Hosting:     []byte(`{"provider":"aws"}`),
+		Source:      []byte(`{"repo":"acme/invoice"}`),
+		Telemetry:   []byte(`[{"kind":"dashboard"}]`),
+		Attributes:  []byte(`{"tier":"internal"}`),
+		Flags:       []string{"unowned"},
+	}
+}
+
+// OWN-4: a human edit is not overwritten by subsequent self-reports. The guard
+// must also be selective — a column the administrator never touched still
+// tracks whatever the agent reports.
+func TestUpsertAgentPreservesHumanEditedField(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	store := db.NewAgentStore(pool)
+	org, team := seedOrgAndTeam(t, pool)
+
+	in := selfReport(org, team, "k8s:default/invoice-triage")
+	first, err := store.Upsert(ctx, in)
+	require.NoError(t, err)
+	require.True(t, first.Created)
+
+	// An administrator gives the agent a readable name in the UI.
+	corrected := "Invoice Triage (Accounts Payable)"
+	humanEdit(t, pool, first.ID, agentEdit{DisplayName: &corrected})
+
+	// The agent re-registers, still reporting its generated name, and reports
+	// a changed purpose that nobody has corrected.
+	in.DisplayName = "invoice-triage-a41b"
+	in.Purpose = "Triages AP invoices and credit memos"
+	second, err := store.Upsert(ctx, in)
+	require.NoError(t, err)
+	require.False(t, second.Created)
+	require.Equal(t, first.ID, second.ID)
+
+	got := readAgent(t, pool, first.ID)
+	require.Equal(t, corrected, got.DisplayName,
+		"a human-edited display_name must survive self-registration")
+	require.Equal(t, "Triages AP invoices and credit memos", got.Purpose,
+		"an unprotected column must still track the self-report")
+}
+
+// Ownership is the edit that matters most: an administrator reassigning an
+// agent to the team that actually runs it must not be undone seconds later by
+// the agent's own enrollment-derived team.
+func TestUpsertAgentPreservesHumanEditedTeam(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	store := db.NewAgentStore(pool)
+	org, team := seedOrgAndTeam(t, pool)
+	financeTeam := seedTeam(t, pool, org, "Finance", "finance")
+
+	in := selfReport(org, team, "k8s:default/invoice-triage")
+	first, err := store.Upsert(ctx, in)
+	require.NoError(t, err)
+	require.True(t, first.Created)
+
+	humanEdit(t, pool, first.ID, agentEdit{TeamID: &financeTeam})
+
+	// The agent re-registers under its original enrollment scope.
+	_, err = store.Upsert(ctx, in)
+	require.NoError(t, err)
+
+	got := readAgent(t, pool, first.ID)
+	require.NotNil(t, got.TeamID)
+	require.Equal(t, financeTeam, *got.TeamID,
+		"a human-assigned team_id must survive self-registration")
+}
+
+// Protecting several columns at once works, and leaves the rest self-reported.
+func TestUpsertAgentPreservesMultipleHumanEditedFields(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	store := db.NewAgentStore(pool)
+	org, team := seedOrgAndTeam(t, pool)
+	financeTeam := seedTeam(t, pool, org, "Finance", "finance")
+
+	in := selfReport(org, team, "k8s:default/invoice-triage")
+	first, err := store.Upsert(ctx, in)
+	require.NoError(t, err)
+
+	name := "Invoice Triage (Accounts Payable)"
+	purpose := "Reviews and codes supplier invoices"
+	humanEdit(t, pool, first.ID, agentEdit{
+		TeamID:      &financeTeam,
+		DisplayName: &name,
+		Purpose:     &purpose,
+	})
+
+	in.DisplayName = "invoice-triage-a41b"
+	in.Purpose = "Triages AP invoices and credit memos"
+	in.Attributes = []byte(`{"tier":"critical"}`)
+	_, err = store.Upsert(ctx, in)
+	require.NoError(t, err)
+
+	got := readAgent(t, pool, first.ID)
+	require.Equal(t, financeTeam, *got.TeamID)
+	require.Equal(t, name, got.DisplayName)
+	require.Equal(t, purpose, got.Purpose)
+	require.JSONEq(t, `{"tier":"critical"}`, got.Attributes,
+		"columns outside human_edited_fields must still update")
+	require.ElementsMatch(t,
+		[]string{"team_id", "display_name", "purpose"}, got.HumanEdited)
+}
+
+// The default is an empty marker set, and with it every self-reported column
+// updates exactly as it did before the guard existed.
+func TestUpsertAgentWithoutHumanEditsUpdatesEveryColumn(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	store := db.NewAgentStore(pool)
+	org, team := seedOrgAndTeam(t, pool)
+	financeTeam := seedTeam(t, pool, org, "Finance", "finance")
+
+	in := selfReport(org, team, "k8s:default/invoice-triage")
+	first, err := store.Upsert(ctx, in)
+	require.NoError(t, err)
+	require.Empty(t, readAgent(t, pool, first.ID).HumanEdited,
+		"human_edited_fields must default to empty")
+
+	updated := db.UpsertAgentInput{
+		OrgID: org, TeamID: financeTeam,
+		Environment: in.Environment,
+		InstanceKey: in.InstanceKey,
+		DisplayName: "invoice-triage-a41b",
+		Purpose:     "Triages AP invoices and credit memos",
+		Platform:    []byte(`{"framework":"crewai"}`),
+		Hosting:     []byte(`{"provider":"gcp"}`),
+		Source:      []byte(`{"repo":"acme/invoice-v2"}`),
+		Telemetry:   []byte(`[{"kind":"trace"}]`),
+		Attributes:  []byte(`{"tier":"critical"}`),
+		Flags:       []string{"unreviewed"},
+	}
+	_, err = store.Upsert(ctx, updated)
+	require.NoError(t, err)
+
+	got := readAgent(t, pool, first.ID)
+	require.Equal(t, financeTeam, *got.TeamID)
+	require.Equal(t, updated.DisplayName, got.DisplayName)
+	require.Equal(t, updated.Purpose, got.Purpose)
+	require.JSONEq(t, string(updated.Platform), got.Platform)
+	require.JSONEq(t, string(updated.Hosting), got.Hosting)
+	require.JSONEq(t, string(updated.Source), got.Source)
+	require.JSONEq(t, string(updated.Telemetry), got.Telemetry)
+	require.JSONEq(t, string(updated.Attributes), got.Attributes)
+	require.Equal(t, updated.Flags, got.Flags)
+}
+
+// A first registration writes the payload verbatim; the new column neither
+// blocks the insert nor arrives populated.
+func TestUpsertAgentInsertIsUnaffectedByHumanEditedFields(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	store := db.NewAgentStore(pool)
+	org, team := seedOrgAndTeam(t, pool)
+
+	in := selfReport(org, team, "k8s:default/invoice-triage")
+	res, err := store.Upsert(ctx, in)
+	require.NoError(t, err)
+	require.True(t, res.Created)
+
+	got := readAgent(t, pool, res.ID)
+	require.Empty(t, got.HumanEdited)
+	require.Equal(t, team, *got.TeamID)
+	require.Equal(t, in.DisplayName, got.DisplayName)
+	require.Equal(t, in.Purpose, got.Purpose)
+	require.JSONEq(t, string(in.Platform), got.Platform)
+	require.JSONEq(t, string(in.Attributes), got.Attributes)
+	require.Equal(t, in.Flags, got.Flags)
+	require.Equal(t, "active", got.LifecycleState)
 }

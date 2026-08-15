@@ -44,14 +44,22 @@ INSERT INTO agents (
     COALESCE($12::text[],'{}')
 )
 ON CONFLICT (org_id, environment, instance_key) DO UPDATE SET
-    team_id         = EXCLUDED.team_id,
-    display_name    = EXCLUDED.display_name,
-    purpose         = EXCLUDED.purpose,
-    platform        = EXCLUDED.platform,
-    hosting         = EXCLUDED.hosting,
-    source          = EXCLUDED.source,
-    telemetry_links = EXCLUDED.telemetry_links,
-    attributes      = EXCLUDED.attributes,
+    team_id = CASE WHEN 'team_id' = ANY(agents.human_edited_fields)
+                   THEN agents.team_id ELSE EXCLUDED.team_id END,
+    display_name = CASE WHEN 'display_name' = ANY(agents.human_edited_fields)
+                        THEN agents.display_name ELSE EXCLUDED.display_name END,
+    purpose = CASE WHEN 'purpose' = ANY(agents.human_edited_fields)
+                   THEN agents.purpose ELSE EXCLUDED.purpose END,
+    platform = CASE WHEN 'platform' = ANY(agents.human_edited_fields)
+                    THEN agents.platform ELSE EXCLUDED.platform END,
+    hosting = CASE WHEN 'hosting' = ANY(agents.human_edited_fields)
+                   THEN agents.hosting ELSE EXCLUDED.hosting END,
+    source = CASE WHEN 'source' = ANY(agents.human_edited_fields)
+                  THEN agents.source ELSE EXCLUDED.source END,
+    telemetry_links = CASE WHEN 'telemetry_links' = ANY(agents.human_edited_fields)
+                           THEN agents.telemetry_links ELSE EXCLUDED.telemetry_links END,
+    attributes = CASE WHEN 'attributes' = ANY(agents.human_edited_fields)
+                      THEN agents.attributes ELSE EXCLUDED.attributes END,
     flags           = EXCLUDED.flags,
     lifecycle_state = CASE
         WHEN agents.lifecycle_state IN ('idle','stale') THEN 'active'
@@ -70,6 +78,28 @@ RETURNING id, (xmax = 0) AS created;
 //
 // Note the lifecycle CASE: re-registering revives an idle or stale agent, but
 // never resurrects one a human deliberately retired or quarantined.
+//
+// Every self-reported column is wrapped in a guard that keeps the stored value
+// when the column's name appears in agents.human_edited_fields. That is OWN-4:
+// once an administrator corrects a field — most importantly the owning team —
+// the agent's next self-report must not silently revert it. The guard lives
+// here, in the statement itself, rather than in a service: a check one layer up
+// would be bypassed by the next caller to write this table, and the guarantee
+// has to hold for all of them.
+//
+// The guard covers exactly the eight columns an agent reports about itself:
+// team_id, display_name, purpose, platform, hosting, source, telemetry_links,
+// attributes. It deliberately does not cover last_heartbeat_at, updated_at,
+// flags, or the lifecycle CASE. Those are server-managed — the server derives
+// them from the act of registering rather than copying them out of the payload,
+// so there is nothing for a human edit to defend them against, and freezing
+// them would stop an agent's own heartbeat from being recorded.
+//
+// Releasing a column back to auto-management is just removing its name from the
+// array. The API for doing that arrives with the admin API in Milestone 5.
+//
+// Flags binds through COALESCE($12::text[],'{}') because a nil []string binds
+// as SQL NULL, which a NOT NULL column rejects.
 func (s *AgentStore) Upsert(ctx context.Context, in UpsertAgentInput) (UpsertAgentResult, error) {
 	var out UpsertAgentResult
 	err := s.pool.QueryRow(ctx, upsertAgentSQL,
