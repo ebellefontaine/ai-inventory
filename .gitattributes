@@ -1,0 +1,13 @@
+# Normalise text files to LF in the repository.
+* text=auto
+
+# Files that must keep LF in the working tree on every platform.
+# GNU make mis-parses recipe lines that end with CR, and gofmt treats CRLF
+# as a formatting diff, which would fail `make lint` and CI.
+Makefile text eol=lf
+*.go       text eol=lf
+*.sh       text eol=lf
+go.mod     text eol=lf
+go.sum     text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
