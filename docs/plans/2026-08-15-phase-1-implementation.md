@@ -781,16 +781,27 @@ func TestUpsertAgentConvergesUnderConcurrency(t *testing.T) {
 		Purpose:     "Triages AP invoices",
 	}
 
+	// Opening a connection costs far more than the upsert itself, so replicas
+	// racing on a cold pool serialize on connection setup and never overlap.
+	// Warm the pool, then release every goroutine from one barrier.
+	warmPool(t, pool)
+
 	const replicas = 20
-	var wg sync.WaitGroup
+	var ready, wg sync.WaitGroup
+	ready.Add(replicas)
+	start := make(chan struct{})
 	errs := make([]error, replicas)
 	for i := 0; i < replicas; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			ready.Done()
+			<-start
 			_, errs[i] = store.Upsert(ctx, in)
 		}(i)
 	}
+	ready.Wait()
+	close(start)
 	wg.Wait()
 
 	for i, err := range errs {
@@ -828,7 +839,11 @@ func TestUpsertAgentScopesByEnvironment(t *testing.T) {
 }
 ```
 
-You will also need small helpers `seedOrgAndTeam` and `countAgents` in a `helpers_test.go`. Write them as plain inserts and counts — no abstraction.
+You will also need small helpers `seedOrgAndTeam`, `countAgents`, and `warmPool` in a `helpers_test.go`. Write them as plain inserts and counts — no abstraction.
+
+**Why the barrier is not optional.** The first version of this test had no pool warming and no barrier, and it **passed against a knowingly broken check-then-insert implementation, three runs out of three.** `pgxpool` opens connections lazily, and establishing a connection costs far more than the upsert, so each goroutine acquired a fresh connection and finished before the next one started. The test was measuring connection setup, not contention. With `warmPool` plus the barrier, the same broken implementation fails deterministically with 20 rows.
+
+A concurrency test that has not been shown to fail against a broken implementation is not evidence of anything. Run that experiment — see the falsification step below.
 
 **Step 2: Run and verify they fail**
 
@@ -981,7 +996,19 @@ Expected: PASS, all three.
 
 To get `-race` locally, install a MinGW-w64 toolchain and set `CGO_ENABLED=1`.
 
-**Step 6: Commit**
+**Step 6: Falsify the concurrency test**
+
+Prove the test detects the bug it guards against. In a throwaway `git worktree`:
+
+1. Change `CREATE UNIQUE INDEX agents_identity_idx` to a plain `CREATE INDEX`.
+2. Replace `Upsert` with the naive check-then-insert an implementer would write without the index — `SELECT` by identity, then `INSERT` if absent.
+3. Run `go test ./internal/db/ -run TestUpsertAgentConvergesUnderConcurrency -count=3`.
+
+Expected: FAIL, `expected: 1, actual: 20`, on all three runs. Then discard the worktree.
+
+Note that simply dropping `UNIQUE` while keeping the `ON CONFLICT` upsert is **not** a valid falsification — it fails with `SQLSTATE 42P10` (no matching constraint) and zero rows, which never exercises the duplicate-row failure mode.
+
+**Step 7: Commit**
 
 ```bash
 git add internal/db/
