@@ -8,7 +8,8 @@ test:
 
 lint:
 	go vet ./...
-	gofmt -l -d .
+	@gofmt -l -d .
+	@test -z "$$(gofmt -l .)" || { echo "gofmt: files above need formatting"; exit 1; }
 
 check: lint test
 
