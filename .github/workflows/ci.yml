@@ -23,9 +23,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          # The module has no dependencies and therefore no go.sum yet.
-          # Set this to true once go.sum exists.
-          cache: false
+          cache: true
 
       - name: Report toolchain
         run: go version
@@ -56,7 +54,11 @@ jobs:
         run: go build ./...
 
       - name: Test
-        run: go test ./... -race -count=1
+        # -p 1 serializes packages. Every test in internal/db and
+        # internal/service starts its own PostgreSQL container, and running
+        # those two packages concurrently exhausts Docker and fails within a
+        # second. Remove this once testdb shares one container per package.
+        run: go test ./... -race -count=1 -p 1 -timeout 30m
 
   dco:
     name: DCO sign-off

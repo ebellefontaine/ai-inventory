@@ -4,7 +4,7 @@ build:
 	go build -o bin/aiinv ./cmd/aiinv
 
 test:
-	go test ./... -race -count=1
+	go test ./... -race -count=1 -p 1 -timeout 30m
 
 lint:
 	go vet ./...
