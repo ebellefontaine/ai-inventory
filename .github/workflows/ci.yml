@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          # The module has no dependencies and therefore no go.sum yet.
+          # Set this to true once go.sum exists.
+          cache: false
+
+      - name: Report toolchain
+        run: go version
+
+      - name: Verify Docker is available
+        # Integration tests from milestone 1 onward use testcontainers, which
+        # needs a live daemon. GitHub-hosted runners provide one; fail loudly
+        # and early rather than inside a confusing test failure if that changes.
+        run: docker info
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt reported unformatted files:"
+            echo "$unformatted"
+            echo "--- diff ---"
+            gofmt -d .
+            echo "Run 'gofmt -w .' to fix."
+            exit 1
+          fi
+          echo "All Go files are gofmt-clean."
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./... -race -count=1
+
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Every commit carries Signed-off-by
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          failed=0
+          for commit in $(git rev-list --no-merges "$BASE_SHA".."$HEAD_SHA"); do
+            if ! git log -1 --format=%B "$commit" \
+                 | grep -qiE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "::error::Missing Signed-off-by: $commit $(git log -1 --format=%s "$commit")"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "See CONTRIBUTING.md. Fix a branch with: git rebase --signoff $BASE_SHA"
+            exit 1
+          fi
+          echo "All commits are signed off."
