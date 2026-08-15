@@ -1,0 +1,22 @@
+# Binaries
+/aiinv
+/aiinv.exe
+/dist/
+/bin/
+
+# Go
+*.test
+*.out
+
+# Node / frontend
+node_modules/
+/web/dist/
+
+# Local config and secrets
+.env
+.env.local
+
+# Editor / OS
+.DS_Store
+.idea/
+*.swp
