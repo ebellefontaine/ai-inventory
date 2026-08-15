@@ -54,8 +54,13 @@ make build      # binary at bin/aiinv
 ```bash
 make test       # go test ./... -race -count=1
 make lint       # go vet ./... and gofmt
-make check      # both, and what CI runs
+make check      # both
 ```
+
+One difference worth knowing: `make lint` *prints* formatting problems but
+still exits 0, because `gofmt -l -d` does not signal failure. CI treats any
+gofmt diff as a hard failure. Run `gofmt -w .` before pushing, or read the
+`make lint` output rather than trusting its exit code.
 
 Tests run with the race detector and `-count=1` so nothing is served from the
 test cache. Integration tests spin up a real PostgreSQL via testcontainers, so

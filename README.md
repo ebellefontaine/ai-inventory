@@ -24,6 +24,9 @@ docker compose up -d
 The UI and API come up on <http://localhost:8080>. Schema migrations, the
 organisation, and the bootstrap administrator initialise on first run.
 
+> Today `docker-compose.yml` defines only PostgreSQL. The `aiinv` service joins
+> it once there is a binary worth running.
+
 **2. Mint an enrollment token.** Tokens are scoped to exactly one team and one
 environment. Agents inherit ownership from the token rather than claiming it in
 the payload, which is what makes the inventory defensible rather than
