@@ -974,8 +974,12 @@ func (s *AgentStore) Upsert(ctx context.Context, in UpsertAgentInput) (UpsertAge
 
 **Step 5: Run and verify all three pass**
 
-Run: `go test ./internal/db/ -run TestUpsertAgent -race -v`
-Expected: PASS. The `-race` flag is not optional on the concurrency test.
+Run: `go test ./internal/db/ -run TestUpsertAgent -count=1 -v`
+Expected: PASS, all three.
+
+**On `-race`:** the race detector needs cgo and a C compiler, which this Windows box does not have (`CGO_ENABLED=0`, no gcc). CI runs `-race` where a compiler is present. This is acceptable because the race detector is not what proves this test — **the unique index plus the "exactly one row" assertion is the proof**, and that holds with or without `-race`. The detector would only catch data races in our own Go code, which at this point is a connection pool and one query.
+
+To get `-race` locally, install a MinGW-w64 toolchain and set `CGO_ENABLED=1`.
 
 **Step 6: Commit**
 
