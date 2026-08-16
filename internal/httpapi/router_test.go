@@ -10,7 +10,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func testHandler() http.Handler { return NewServer(discardLogger()).Handler() }
+// testHandler is the router without services behind it. Every test that uses it
+// exercises routing, method matching, or the body cap — paths that answer before
+// a handler ever reaches a service — so the nil services are never dereferenced.
+// The tests that do reach one build a real server over a real database in
+// agents_test.go.
+func testHandler() http.Handler { return NewServer(discardLogger(), nil, nil, nil).Handler() }
 
 func do(t *testing.T, h http.Handler, method, target string, body io.Reader) capturedResponse {
 	t.Helper()
@@ -68,8 +73,11 @@ func TestWrongMethodReturnsMethodNotAllowedEnvelope(t *testing.T) {
 	}
 }
 
-// TestAgentRoutesAreRegistered proves routing, not behaviour: Tasks 21-23
-// replace the 501s. A 404 here would mean the pattern never matched.
+// TestAgentRoutesAreRegistered proves routing, not behaviour. A 404 would mean
+// the pattern never matched; a 401 means the handler ran and refused a request
+// that carried no credential, which is as far as an unauthenticated request
+// gets and as far as this test needs to look. What the handlers do with a real
+// credential is agents_test.go's business, over a real database.
 func TestAgentRoutesAreRegistered(t *testing.T) {
 	cases := []struct{ method, target string }{
 		{http.MethodPost, "/api/v1/agents:register"},
@@ -81,8 +89,8 @@ func TestAgentRoutesAreRegistered(t *testing.T) {
 		t.Run(tc.method+" "+tc.target, func(t *testing.T) {
 			got := do(t, testHandler(), tc.method, tc.target, strings.NewReader(`{"name":"billing-triage"}`))
 
-			require.Equal(t, http.StatusNotImplemented, got.Status)
-			require.Equal(t, codeNotImplemented, decodeEnvelope(t, got.Body).Error.Code)
+			require.Equal(t, http.StatusUnauthorized, got.Status)
+			require.Equal(t, codeUnauthorized, decodeEnvelope(t, got.Body).Error.Code)
 		})
 	}
 }

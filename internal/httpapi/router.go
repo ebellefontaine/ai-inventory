@@ -19,27 +19,52 @@
 package httpapi
 
 import (
-	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/ebellefontaine/ai-inventory/internal/service"
 )
 
-// Server holds what the handlers need. Tasks 21-23 add the services to it; the
-// logger is here from the start because the failures this package maps are only
+// Server holds what the handlers need: the three services one per route, and
+// the logger, which is here because the failures this package maps are only
 // diagnosable if the real error is written down somewhere.
+//
+// The services are held as concrete types rather than behind interfaces
+// declared here. An interface would buy a fake in these tests, and a fake is
+// exactly what must not be used: the properties this layer is responsible for
+// preserving — ownership taken from the token, one indistinguishable 401 —
+// are properties of the services talking to a real database, and a fake that
+// returned whatever the test wanted would assert nothing about either.
 type Server struct {
-	logger *slog.Logger
+	logger       *slog.Logger
+	registration *service.RegistrationService
+	heartbeat    *service.HeartbeatService
+	update       *service.UpdateService
 }
 
 // NewServer returns a Server logging to logger, or to the default logger if
 // that is nil — a server that silently discarded its diagnostics would be worse
 // than a noisy one.
-func NewServer(logger *slog.Logger) *Server {
+//
+// The services are separate parameters rather than one struct because the
+// compiler then refuses a call that omits one, and a router wired to a nil
+// service is a route that panics on its first real request.
+func NewServer(
+	logger *slog.Logger,
+	registration *service.RegistrationService,
+	heartbeat *service.HeartbeatService,
+	update *service.UpdateService,
+) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{logger: logger}
+	return &Server{
+		logger:       logger,
+		registration: registration,
+		heartbeat:    heartbeat,
+		update:       update,
+	}
 }
 
 // Handler builds the routing table and wraps it in the middleware chain.
@@ -103,26 +128,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-// errNotImplemented is what the three stubs below report until Tasks 21-23
-// replace them.
-var errNotImplemented = errors.New("endpoint not implemented")
-
-// handleRegister will enroll an agent with a scoped enrollment token. Task 21.
-func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	writeAPIError(w, r, s.logger, notImplemented, errNotImplemented)
-}
-
-// handleHeartbeat will record liveness for one replica. Task 22. The agent id
-// is r.PathValue("id").
-func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
-	writeAPIError(w, r, s.logger, notImplemented, errNotImplemented)
-}
-
-// handleUpdate will apply a partial descriptor update. Task 23. The agent id is
-// r.PathValue("id").
-func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
-	writeAPIError(w, r, s.logger, notImplemented, errNotImplemented)
-}
+// The three agent handlers are in agents.go.
 
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	writeAPIError(w, r, s.logger, notFound, nil)

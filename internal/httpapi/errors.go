@@ -22,13 +22,6 @@ const (
 	codeMethodNotAllowed = "method_not_allowed"
 	codePayloadTooLarge  = "payload_too_large"
 	codeInternal         = "internal"
-
-	// codeNotImplemented is a placeholder for the three agent routes, which are
-	// registered here and filled in by Tasks 21-23. It exists so that a stub
-	// answers in the same envelope as everything else rather than teaching
-	// clients that some failures have a different shape. It disappears with the
-	// last stub.
-	codeNotImplemented = "not_implemented"
 )
 
 // errorEnvelope is the one shape every failure is reported in, whatever layer
@@ -75,8 +68,6 @@ var (
 	// with SQL context on their way up and would otherwise hand a caller the
 	// schema.
 	internalFailure = apiError{http.StatusInternalServerError, codeInternal, "internal server error"}
-
-	notImplemented = apiError{http.StatusNotImplemented, codeNotImplemented, "endpoint not implemented"}
 )
 
 // errUnauthenticated is what the request never got as far as a credential —

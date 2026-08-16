@@ -23,7 +23,7 @@ func captureLogs() (*bytes.Buffer, *slog.Logger) {
 // one request, not the process.
 func TestPanicIsRecoveredAndServerKeepsServing(t *testing.T) {
 	logs, logger := captureLogs()
-	handler := NewServer(logger).wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := NewServer(logger, nil, nil, nil).wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/boom" {
 			panic("descriptor decode exploded")
 		}
@@ -55,7 +55,7 @@ func TestOversizedDeclaredBodyIsRejected(t *testing.T) {
 // lies about it, is caught by MaxBytesReader when the handler reads.
 func TestOversizedUndeclaredBodyIsRejected(t *testing.T) {
 	logger := discardLogger()
-	handler := NewServer(logger).wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := NewServer(logger, nil, nil, nil).wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := io.ReadAll(r.Body); err != nil {
 			respondError(w, r, logger, err)
 			return
@@ -90,16 +90,19 @@ func TestBodyAtTheCapIsAccepted(t *testing.T) {
 // view of the traffic, and it is also a place a token would live forever.
 func TestRequestLogRecordsTheRequestButNoCredential(t *testing.T) {
 	logs, logger := captureLogs()
-	handler := NewServer(logger).Handler()
+	handler := NewServer(logger, nil, nil, nil).Handler()
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents:register", strings.NewReader(`{}`))
+	// A malformed agent id is refused before the handler reaches a service,
+	// which is what lets this test carry a real-looking credential through the
+	// whole chain without a database behind it.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/not-a-uuid/heartbeat", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer aiinv_ac_supersecretvalue")
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	line := logs.String()
 	require.Contains(t, line, `"method":"POST"`)
-	require.Contains(t, line, `"path":"/api/v1/agents:register"`)
-	require.Contains(t, line, `"status":501`)
+	require.Contains(t, line, `"path":"/api/v1/agents/not-a-uuid/heartbeat"`)
+	require.Contains(t, line, `"status":401`)
 	require.Contains(t, line, `"duration_ms"`)
 
 	require.NotContains(t, line, "aiinv_ac_supersecretvalue", "a token in a log is a token that outlives its rotation")
