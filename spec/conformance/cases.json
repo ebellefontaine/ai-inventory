@@ -1,0 +1,357 @@
+{
+  "$schema_note": "Declarative request/response cases covering FUNCTIONAL.md section 5 (AR-1 through AR-9). internal/httpapi/contract_test.go executes these against the HTTP surface; Milestone 4 will add a runner that executes the same file against the MCP surface, so nothing here may name an HTTP-specific concept like a status code or a header. 'status' is a symbolic outcome the runner maps onto its own transport.",
+
+  "cases": [
+    {
+      "id": "AR-1-authorization-required",
+      "requirement": "AR-1",
+      "description": "Registration refuses a caller that presents no enrollment token.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "none",
+          "body": { "name": "Unauthenticated agent", "purpose": "Should never be recorded" },
+          "expect": { "status": "unauthorized" }
+        }
+      ]
+    },
+    {
+      "id": "AR-1-response-contains-credential-and-interval",
+      "requirement": "AR-1",
+      "description": "A successful registration returns an agent id, a per-agent credential, and the heartbeat interval the server wants used, in one round trip.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": {
+            "name": "Invoice triage",
+            "purpose": "Triages AP invoices",
+            "instance_key": "contract-ar1-full",
+            "platform": { "framework": "langgraph" },
+            "hosting": { "provider": "aws" },
+            "source": { "repo_url": "https://github.com/acme/triage" }
+          },
+          "save_as": "self",
+          "expect": {
+            "status": "created",
+            "created": true,
+            "agent_token_present": true,
+            "heartbeat_interval_positive": true,
+            "flags_equal": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "AR-1-minimal-descriptor-succeeds",
+      "requirement": "AR-1",
+      "description": "Registration succeeds with only name and purpose; every other descriptor field is optional and its absence is recorded as a flag rather than a rejection.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": {
+            "name": "Minimal agent",
+            "purpose": "Does the minimum",
+            "instance_key": "contract-ar1-minimal"
+          },
+          "save_as": "self",
+          "expect": {
+            "status": "created",
+            "created": true,
+            "flags_equal": ["missing_hosting", "missing_platform", "missing_source"]
+          }
+        }
+      ]
+    },
+    {
+      "id": "AR-3-full-identity-descriptor-is-stored",
+      "requirement": "AR-3",
+      "description": "The descriptor carries framework, hosting, and source provenance, and every reported field is stored.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": {
+            "name": "Invoice triage",
+            "purpose": "Triages AP invoices",
+            "instance_key": "contract-ar3-full",
+            "platform": { "framework": "langgraph", "framework_version": "0.3.0" },
+            "hosting": { "provider": "aws", "region": "us-east-1", "account_id": "123456789012", "resource_id": "arn:aws:lambda:us-east-1:123456789012:function:invoice-triage" },
+            "source": { "repo_url": "https://github.com/acme/triage", "commit_sha": "abcdef1" }
+          },
+          "save_as": "self",
+          "expect": { "status": "created", "created": true, "flags_equal": [] }
+        }
+      ],
+      "store_checks": [
+        {
+          "agent": "self",
+          "platform_contains": ["langgraph", "0.3.0"],
+          "hosting_contains": ["aws", "us-east-1", "123456789012"],
+          "source_contains": ["github.com/acme/triage", "abcdef1"]
+        }
+      ]
+    },
+    {
+      "id": "AR-3-ownership-inherited-from-token",
+      "requirement": "AR-3",
+      "description": "Owning team and environment are not accepted from the descriptor. A descriptor that claims different values is recorded and flagged, but the stored record shows only what the enrollment token scoped.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": {
+            "name": "Invoice triage",
+            "purpose": "Triages AP invoices",
+            "instance_key": "contract-ar3-ownership",
+            "team": "security",
+            "team_id": "00000000-0000-0000-0000-000000000099",
+            "environment": "development",
+            "env": "development"
+          },
+          "save_as": "self",
+          "expect": {
+            "status": "created",
+            "created": true,
+            "flags_include": ["ignored_scope_fields"]
+          }
+        }
+      ],
+      "store_checks": [
+        {
+          "agent": "self",
+          "team_equals_token_team": true,
+          "environment_equals_token_environment": true
+        }
+      ]
+    },
+    {
+      "id": "AR-3-unknown-fields-preserved-not-rejected",
+      "requirement": "AR-3",
+      "description": "A descriptor field this system does not recognise is preserved in the attributes bag and flagged, rather than dropped or causing the registration to be refused.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": {
+            "name": "Invoice triage",
+            "purpose": "Triages AP invoices",
+            "instance_key": "contract-ar3-unknown",
+            "cost_center": "CC-4471",
+            "favorite_color": "teal"
+          },
+          "save_as": "self",
+          "expect": {
+            "status": "created",
+            "created": true,
+            "flags_include": ["unknown_fields"]
+          }
+        }
+      ],
+      "store_checks": [
+        {
+          "agent": "self",
+          "attributes_contains": ["cost_center", "CC-4471", "favorite_color", "teal"]
+        }
+      ]
+    },
+    {
+      "id": "AR-4-telemetry-links-accepted-including-unrecognised-kinds",
+      "requirement": "AR-4",
+      "description": "Typed telemetry links are stored. A kind this system does not specifically recognise is preserved rather than dropped.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": {
+            "name": "Invoice triage",
+            "purpose": "Triages AP invoices",
+            "instance_key": "contract-ar4-telemetry",
+            "telemetry_links": [
+              { "kind": "dashboard", "label": "Grafana", "url": "https://grafana.example.com/d/abc", "external_id": "abc" },
+              { "kind": "some_future_kind_nobody_has_invented_yet", "label": "Custom", "url": "https://example.com/custom", "external_id": "xyz" }
+            ]
+          },
+          "save_as": "self",
+          "expect": { "status": "created", "created": true }
+        }
+      ],
+      "store_checks": [
+        {
+          "agent": "self",
+          "telemetry_contains": ["dashboard", "Grafana", "grafana.example.com", "some_future_kind_nobody_has_invented_yet", "Custom", "example.com/custom"]
+        }
+      ]
+    },
+    {
+      "id": "AR-5-reregistration-updates-same-record",
+      "requirement": "AR-5",
+      "description": "Registration is an idempotent upsert keyed on (organisation, environment, instance_key). Re-registering with a changed descriptor updates the existing record rather than creating a second one.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": { "name": "Invoice triage", "purpose": "Triages AP invoices v1", "instance_key": "contract-ar5-reregister" },
+          "save_as": "self",
+          "expect": { "status": "created", "created": true }
+        },
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": { "name": "Invoice triage", "purpose": "Triages AP invoices v2", "instance_key": "contract-ar5-reregister" },
+          "expect": { "status": "ok", "created": false, "agent_id_matches": "self" }
+        }
+      ],
+      "store_checks": [
+        { "agent": "self", "purpose": "Triages AP invoices v2" }
+      ]
+    },
+    {
+      "id": "AR-5-replica-count-reflects-registrations-and-heartbeats",
+      "requirement": "AR-5",
+      "description": "N replicas of one deployment registering under the same instance_key produce one agent record. The replica count is derived from which issued credentials have beaten recently, not asserted by the agent.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": { "name": "Worker", "purpose": "Processes jobs", "instance_key": "contract-ar5-replica" },
+          "save_as": "self",
+          "expect": { "status": "created", "created": true }
+        },
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": { "name": "Worker", "purpose": "Processes jobs", "instance_key": "contract-ar5-replica" },
+          "save_as": "replica2",
+          "expect": { "status": "ok", "created": false, "agent_id_matches": "self" }
+        },
+        {
+          "op": "heartbeat",
+          "auth": "agent_token",
+          "agent": "self",
+          "expect": { "status": "ok", "replica_count": 1 }
+        },
+        {
+          "op": "heartbeat",
+          "auth": "agent_token",
+          "agent": "replica2",
+          "expect": { "status": "ok", "replica_count": 2 }
+        }
+      ]
+    },
+    {
+      "id": "AR-6-heartbeat-accepts-credential-and-empty-body",
+      "requirement": "AR-6",
+      "description": "A heartbeat authenticates with the per-agent credential and carries no payload; the server returns the interval it wants used and its current view of the agent's lifecycle.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": { "name": "Worker", "purpose": "Processes jobs", "instance_key": "contract-ar6-empty" },
+          "save_as": "self",
+          "expect": { "status": "created", "created": true }
+        },
+        {
+          "op": "heartbeat",
+          "auth": "agent_token",
+          "agent": "self",
+          "expect": {
+            "status": "ok",
+            "lifecycle_state": "active",
+            "heartbeat_interval_matches_registration": "self"
+          }
+        }
+      ]
+    },
+    {
+      "id": "AR-6-heartbeat-does-not-write-a-revision",
+      "requirement": "AR-6",
+      "description": "A heartbeat updates last-seen and replica count only. It is not a descriptor update and must not append to the revision history.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": { "name": "Worker", "purpose": "Processes jobs", "instance_key": "contract-ar6-norevision" },
+          "save_as": "self",
+          "expect": { "status": "created", "created": true }
+        },
+        {
+          "op": "heartbeat",
+          "auth": "agent_token",
+          "agent": "self",
+          "expect": { "status": "ok" }
+        }
+      ],
+      "store_checks": [
+        { "agent": "self", "revision_count": 1 }
+      ]
+    },
+    {
+      "id": "AR-7-patch-applies-partial-update-and-writes-a-revision",
+      "requirement": "AR-7",
+      "description": "PATCH accepts a partial descriptor using the per-agent credential. Every accepted change is written to the record and recorded as a revision; fields the payload did not mention are left alone.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": {
+            "name": "Invoice triage",
+            "purpose": "Triages AP invoices",
+            "instance_key": "contract-ar7-patch",
+            "hosting": { "provider": "aws", "region": "us-east-1" }
+          },
+          "save_as": "self",
+          "expect": { "status": "created", "created": true }
+        },
+        {
+          "op": "update",
+          "auth": "agent_token",
+          "agent": "self",
+          "body": { "hosting": { "provider": "gcp", "region": "europe-west1" } },
+          "expect": { "status": "ok", "changed": true }
+        }
+      ],
+      "store_checks": [
+        {
+          "agent": "self",
+          "display_name": "Invoice triage",
+          "purpose": "Triages AP invoices",
+          "hosting_contains": ["gcp", "europe-west1"],
+          "revision_count": 2
+        }
+      ]
+    },
+    {
+      "id": "AR-7-noop-patch-writes-no-revision",
+      "requirement": "AR-7",
+      "description": "A PATCH that re-sends what the record already holds is not a change and must not append a revision.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": { "name": "Invoice triage", "purpose": "Same purpose throughout", "instance_key": "contract-ar7-noop" },
+          "save_as": "self",
+          "expect": { "status": "created", "created": true }
+        },
+        {
+          "op": "update",
+          "auth": "agent_token",
+          "agent": "self",
+          "body": { "purpose": "Same purpose throughout" },
+          "expect": { "status": "ok", "changed": false }
+        }
+      ],
+      "store_checks": [
+        { "agent": "self", "revision_count": 1 }
+      ]
+    }
+  ],
+
+  "known_gaps": [
+    {
+      "requirement": "AR-3",
+      "description": "The optional agent_card field (A2A Agent Card) is not yet mapped onto the descriptor. FUNCTIONAL.md AR-3 requires name, description, version, provider, and skills to be mapped; today agent_card is unrecognised and lands verbatim in attributes, raising unknown_fields instead. The mapping for fields with no direct descriptor equivalent (version, provider, skills) has not been designed yet."
+    }
+  ]
+}
