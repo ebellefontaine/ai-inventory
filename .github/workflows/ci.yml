@@ -54,10 +54,18 @@ jobs:
         run: go build ./...
 
       - name: Test
-        # -p 1 serializes packages. Every test in internal/db and
-        # internal/service starts its own PostgreSQL container, and running
-        # those two packages concurrently exhausts Docker and fails within a
-        # second. Remove this once testdb shares one container per package.
+        # -p 1 serializes packages. testdb now shares one container per test
+        # binary via template databases, so the original cause -- ~40 container
+        # starts exhausting Docker -- is gone. A second race remains underneath
+        # it: concurrent testcontainers provider initialization fails 5 runs out
+        # of 5 on Windows ("rootless Docker is not supported on Windows"), with
+        # the victim package varying each time.
+        #
+        # That error is Windows-specific and this job runs on ubuntu-latest, so
+        # -p 1 may well be unnecessary here. Nobody has measured it on Linux.
+        # Before removing this, run the suite without -p 1 several times on a
+        # runner and confirm it is stable -- do not remove it on the strength of
+        # the comment above.
         run: go test ./... -race -count=1 -p 1 -timeout 30m
 
   dco:
