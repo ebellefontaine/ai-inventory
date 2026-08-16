@@ -345,6 +345,60 @@
       "store_checks": [
         { "agent": "self", "revision_count": 1 }
       ]
+    },
+    {
+      "id": "AR-1-bogus-enrollment-token-is-rejected",
+      "requirement": "AR-1",
+      "description": "Registration refuses a caller that presents a syntactically valid but unrecognised enrollment token, the same as it refuses one that presents none.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "bogus_token",
+          "body": { "name": "Bogus-token agent", "purpose": "Should never be recorded" },
+          "expect": { "status": "unauthorized" }
+        }
+      ]
+    },
+    {
+      "id": "AR-6-bogus-agent-credential-is-rejected",
+      "requirement": "AR-6",
+      "description": "A heartbeat refuses a caller that presents a syntactically valid but unrecognised per-agent credential.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": { "name": "Worker", "purpose": "Processes jobs", "instance_key": "contract-ar6-bogus" },
+          "save_as": "self",
+          "expect": { "status": "created", "created": true }
+        },
+        {
+          "op": "heartbeat",
+          "auth": "bogus_token",
+          "agent": "self",
+          "expect": { "status": "unauthorized" }
+        }
+      ]
+    },
+    {
+      "id": "AR-7-bogus-agent-credential-is-rejected",
+      "requirement": "AR-7",
+      "description": "A PATCH refuses a caller that presents a syntactically valid but unrecognised per-agent credential.",
+      "steps": [
+        {
+          "op": "register",
+          "auth": "enrollment_token",
+          "body": { "name": "Worker", "purpose": "Processes jobs", "instance_key": "contract-ar7-bogus" },
+          "save_as": "self",
+          "expect": { "status": "created", "created": true }
+        },
+        {
+          "op": "update",
+          "auth": "bogus_token",
+          "agent": "self",
+          "body": { "purpose": "Should not apply" },
+          "expect": { "status": "unauthorized" }
+        }
+      ]
     }
   ],
 

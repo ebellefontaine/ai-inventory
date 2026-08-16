@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/require"
 
 	"github.com/ebellefontaine/ai-inventory/internal/config"
@@ -413,6 +414,120 @@ func TestUsageIsNotAnError(t *testing.T) {
 
 	require.NoError(t, run(context.Background(), []string{"--help"}, empty, &out, io.Discard))
 	require.Contains(t, out.String(), "token create")
+}
+
+// TestAgentLifecycleOverMCP mirrors TestAgentLifecycleOverHTTP but drives the
+// same lifecycle through a real MCP client over a real streamable HTTP
+// connection, proving the MCP surface mounted alongside the REST API
+// authenticates and behaves the same way.
+func TestAgentLifecycleOverMCP(t *testing.T) {
+	cfg := testConfig(t, migratedDatabaseURL(t))
+	ctx := context.Background()
+
+	app, err := newApp(ctx, cfg, testLogger())
+	require.NoError(t, err)
+	defer app.close()
+
+	minted, err := app.createToken(ctx, "finance-platform", "production", "mcp-smoke")
+	require.NoError(t, err)
+
+	server := httptest.NewServer(app.handler)
+	defer server.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "smoke-client", Version: "v0.0.0"}, nil)
+	transport := &mcp.StreamableClientTransport{
+		Endpoint:   server.URL + "/mcp",
+		HTTPClient: &http.Client{Transport: bearerRoundTripper{token: minted.Plaintext}},
+	}
+	session, err := client.Connect(ctx, transport, nil)
+	require.NoError(t, err)
+	defer session.Close()
+
+	registerResult, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "register_agent",
+		Arguments: map[string]any{
+			"descriptor": map[string]any{
+				"name":         "invoice-triage",
+				"purpose":      "Triages accounts-payable invoices",
+				"instance_key": "mcp-smoke-1",
+				"team":         "somebody-elses-team",
+				"environment":  "development",
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.False(t, registerResult.IsError, "%+v", registerResult)
+
+	var registered struct {
+		AgentID                  string   `json:"agent_id"`
+		AgentToken               string   `json:"agent_token"`
+		HeartbeatIntervalSeconds int      `json:"heartbeat_interval_seconds"`
+		Flags                    []string `json:"flags"`
+		Created                  bool     `json:"created"`
+	}
+	require.NoError(t, json.Unmarshal(structuredContentBytes(t, registerResult), &registered))
+	require.True(t, registered.Created)
+	require.Contains(t, registered.Flags, domain.FlagIgnoredScopeFields)
+
+	// Reconnect as the agent: the agent's own credential authenticates
+	// heartbeat and update_agent, not the enrollment token.
+	agentTransport := &mcp.StreamableClientTransport{
+		Endpoint:   server.URL + "/mcp",
+		HTTPClient: &http.Client{Transport: bearerRoundTripper{token: registered.AgentToken}},
+	}
+	agentSession, err := client.Connect(ctx, agentTransport, nil)
+	require.NoError(t, err)
+	defer agentSession.Close()
+
+	beatResult, err := agentSession.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "heartbeat",
+		Arguments: map[string]any{"agent_id": registered.AgentID},
+	})
+	require.NoError(t, err)
+	require.False(t, beatResult.IsError, "%+v", beatResult)
+
+	updateResult, err := agentSession.CallTool(ctx, &mcp.CallToolParams{
+		Name: "update_agent",
+		Arguments: map[string]any{
+			"agent_id":   registered.AgentID,
+			"descriptor": map[string]any{"purpose": "Triages and codes accounts-payable invoices"},
+		},
+	})
+	require.NoError(t, err)
+	require.False(t, updateResult.IsError, "%+v", updateResult)
+
+	getResult, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "get_agent",
+		Arguments: map[string]any{"agent_id": registered.AgentID},
+	})
+	require.NoError(t, err)
+	require.False(t, getResult.IsError, "%+v", getResult)
+
+	var fetched struct {
+		DisplayName string `json:"display_name"`
+		Purpose     string `json:"purpose"`
+		TeamSlug    string `json:"team_slug"`
+		Environment string `json:"environment"`
+	}
+	require.NoError(t, json.Unmarshal(structuredContentBytes(t, getResult), &fetched))
+	require.Equal(t, "invoice-triage", fetched.DisplayName)
+	require.Equal(t, "Triages and codes accounts-payable invoices", fetched.Purpose)
+	require.Equal(t, "finance-platform", fetched.TeamSlug, "ownership must come from the token")
+	require.Equal(t, "production", fetched.Environment, "the environment must come from the token")
+}
+
+type bearerRoundTripper struct{ token string }
+
+func (rt bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set("Authorization", "Bearer "+rt.token)
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+func structuredContentBytes(t *testing.T, res *mcp.CallToolResult) []byte {
+	t.Helper()
+	raw, err := json.Marshal(res.StructuredContent)
+	require.NoError(t, err)
+	return raw
 }
 
 // TestUnknownSubcommandFails: a mistyped subcommand must not fall through to

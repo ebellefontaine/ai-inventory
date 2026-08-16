@@ -11,11 +11,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/ebellefontaine/ai-inventory/internal/config"
 	"github.com/ebellefontaine/ai-inventory/internal/db"
 	"github.com/ebellefontaine/ai-inventory/internal/domain"
 	"github.com/ebellefontaine/ai-inventory/internal/httpapi"
+	"github.com/ebellefontaine/ai-inventory/internal/mcpapi"
 	"github.com/ebellefontaine/ai-inventory/internal/service"
 	"github.com/ebellefontaine/ai-inventory/internal/worker"
 )
@@ -106,12 +108,33 @@ func newApp(ctx context.Context, cfg config.Config, logger *slog.Logger) (*app, 
 	registration := service.NewRegistrationService(pool, tokens, cfg.HeartbeatIntervalSeconds)
 	heartbeat := service.NewHeartbeatService(pool, cfg.HeartbeatIntervalSeconds)
 	update := service.NewUpdateService(pool)
+	query := service.NewQueryService(pool, tokens)
+
+	mcpServer := mcpapi.NewServer(registration, heartbeat, update, query)
+	// Logger and MaxRequestBodyBytes are set explicitly rather than left at
+	// their zero values, which would otherwise give /mcp no access log and a
+	// 4 MiB unauthenticated body budget instead of the REST API's deliberate
+	// 64 KiB (httpapi.MaxBodyBytes). Reusing that constant, rather than a
+	// second literal, is what keeps the two surfaces' body limits from
+	// silently drifting apart.
+	mcpHandler := mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return mcpServer },
+		&mcp.StreamableHTTPOptions{
+			Stateless:           true,
+			Logger:              logger,
+			MaxRequestBodyBytes: httpapi.MaxBodyBytes,
+		},
+	)
+
+	mux := http.NewServeMux()
+	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/", httpapi.NewServer(logger, registration, heartbeat, update).Handler())
 
 	return &app{
 		cfg:       cfg,
 		logger:    logger,
 		pool:      pool,
-		handler:   httpapi.NewServer(logger, registration, heartbeat, update).Handler(),
+		handler:   mux,
 		tokens:    tokens,
 		bootstrap: bootstrap,
 		orgID:     orgID,

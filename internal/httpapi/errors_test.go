@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/ebellefontaine/ai-inventory/internal/auth"
 	"github.com/ebellefontaine/ai-inventory/internal/domain"
 	"github.com/ebellefontaine/ai-inventory/internal/service"
 )
@@ -129,7 +130,7 @@ func TestUnusableAuthorizationHeadersProduceTheSame401(t *testing.T) {
 				req.Header.Set("Authorization", header)
 			}
 
-			token, err := bearerToken(req)
+			token, err := auth.BearerToken(req.Header)
 			require.Empty(t, token)
 			require.ErrorIs(t, err, errUnauthenticated)
 
@@ -147,7 +148,7 @@ func TestBearerSchemeIsCaseInsensitive(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/x/heartbeat", nil)
 			req.Header.Set("Authorization", scheme+" aiinv_ac_secret")
 
-			token, err := bearerToken(req)
+			token, err := auth.BearerToken(req.Header)
 
 			require.NoError(t, err)
 			require.Equal(t, "aiinv_ac_secret", token)

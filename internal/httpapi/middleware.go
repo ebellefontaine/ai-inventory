@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
-	"strings"
 	"time"
 )
 
@@ -145,28 +144,4 @@ func limitBody(logger *slog.Logger, max int64, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-// bearerToken pulls the credential out of the Authorization header.
-//
-// Every failure returns the same errUnauthenticated, which classify collapses
-// into the same 401 as a revoked credential. The scheme is matched without
-// regard to case because RFC 9110 defines it that way, and because a client
-// that sends "bearer" is a client with a working credential.
-//
-// The token is returned to be handed to a service, never inspected here: this
-// layer does not know what a valid credential looks like, and the services
-// authenticate inside their own transactions so that a refused call writes
-// nothing. Checking here as well would mean two round trips and two places that
-// could come to disagree about what "valid" means.
-func bearerToken(r *http.Request) (string, error) {
-	scheme, rest, found := strings.Cut(r.Header.Get("Authorization"), " ")
-	if !found || !strings.EqualFold(scheme, "bearer") {
-		return "", errUnauthenticated
-	}
-	token := strings.TrimSpace(rest)
-	if token == "" {
-		return "", errUnauthenticated
-	}
-	return token, nil
 }

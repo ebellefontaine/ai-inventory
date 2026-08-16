@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/ebellefontaine/ai-inventory/internal/auth"
 	"github.com/ebellefontaine/ai-inventory/internal/domain"
 	"github.com/ebellefontaine/ai-inventory/internal/service"
 )
@@ -71,33 +72,29 @@ var (
 )
 
 // errUnauthenticated is what the request never got as far as a credential —
-// no Authorization header, the wrong scheme, an empty token. It is classified
-// with the service's authentication sentinels rather than separately, because a
-// caller who can tell "you sent nothing" from "what you sent is dead" has
-// learned something about a token they were guessing at.
-var errUnauthenticated = errors.New("no usable bearer credential in request")
+// no Authorization header, the wrong scheme, an empty token. It is an alias
+// for auth.ErrNoBearerToken, not a second definition of the same idea: MCP
+// tool calls hit the identical check through the identical sentinel.
+var errUnauthenticated = auth.ErrNoBearerToken
 
-// authFailures is every error that must be indistinguishable on the wire.
+// authFailures is every error that must be indistinguishable on the wire:
+// errUnauthenticated (this layer's own "sent nothing" case) plus the closed
+// set every service-layer credential check can return. Sourcing the second
+// half from service.AuthSentinels rather than listing it here again is what
+// keeps a future addition to that set — Task 2 of the MCP surface plan adds
+// ErrAgentNotVisible — from silently not reaching this classifier.
 //
-// It carries all eight of the service's token and credential sentinels,
-// including ErrInvalidEnvironment. That one is not an authentication failure at
-// all — it is an operator mistyping an environment on Mint, on an admin surface
-// this router does not yet expose — and classifying it here is the fail-closed
-// choice: an over-broad 401 tells a caller nothing, whereas leaving a token
-// sentinel out of this list is exactly the omission that reopens the oracle.
-// When the admin API arrives it should be reclassified as a 400 there, with a
-// test that keeps it out of any response an unauthenticated caller can reach.
-var authFailures = []error{
-	errUnauthenticated,
-	service.ErrTokenNotFound,
-	service.ErrTokenRevoked,
-	service.ErrTokenExpired,
-	service.ErrInvalidEnvironment,
-	service.ErrCredentialNotFound,
-	service.ErrCredentialRevoked,
-	service.ErrCredentialExpired,
-	service.ErrCredentialAgentMismatch,
-}
+// service.AuthSentinels carries all eight of the service's token and
+// credential sentinels, including ErrInvalidEnvironment. That one is not an
+// authentication failure at all — it is an operator mistyping an environment
+// on Mint, on an admin surface this router does not yet expose — and
+// classifying it here anyway is the fail-closed choice: an over-broad 401
+// tells a caller nothing, whereas leaving a token sentinel out of this list
+// is exactly the omission that reopens the oracle. When the admin API
+// arrives, ErrInvalidEnvironment should be reclassified as a 400 there, with
+// a test that keeps it out of any response an unauthenticated caller can
+// reach.
+var authFailures = append([]error{errUnauthenticated}, service.AuthSentinels...)
 
 // classify turns any error into the response a caller is allowed to see.
 //
