@@ -92,8 +92,14 @@ func TestRegisterAgentToolRequiresAnEnrollmentToken(t *testing.T) {
 		Descriptor: map[string]any{"name": "x", "purpose": "y"},
 	})
 
-	require.Error(t, err)
-	require.Nil(t, res)
+	// The handler reports a failure as a populated, IsError result with a
+	// nil Go error -- never the raw error -- so mcp.AddTool's wrapper cannot
+	// pack err.Error() into Content and leak which sentinel fired. See
+	// errors_test.go for the fuller proof that every failure mode lands on
+	// exactly the same bytes.
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.True(t, res.IsError)
 }
 
 func TestHeartbeatTool(t *testing.T) {

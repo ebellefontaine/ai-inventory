@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/ebellefontaine/ai-inventory/internal/auth"
@@ -100,8 +99,9 @@ func NewServer(
 
 // bearerToken extracts the credential from req, wrapped so every handler
 // below reports a failure the same way this plan's Task 1 already made HTTP
-// and MCP agree on: auth.ErrNoBearerToken is part of service.AuthSentinels
-// by construction, since it is the same sentinel internal/httpapi uses.
+// and MCP agree on: toolError classifies auth.ErrNoBearerToken as an
+// authentication failure explicitly, alongside every sentinel in
+// service.AuthSentinels — see toolError in errors.go.
 //
 // req.Extra is nil over the in-memory transport (no real HTTP request sits
 // behind it), which is exactly the case Task 3's tests construct by hand; a
@@ -114,21 +114,6 @@ func bearerToken(req *mcp.CallToolRequest) (string, error) {
 		header = req.Extra.Header
 	}
 	return auth.BearerToken(header)
-}
-
-// parseAgentID mirrors internal/httpapi/agents.go's agentID: an unparseable
-// id is refused as an authentication failure rather than a distinct "bad
-// input" error, for the same enumeration-oracle reason documented there — a
-// caller who could tell "malformed id" apart from "well-formed id, wrong
-// credential" would learn that the id's shape is checked before the
-// credential is, which is exactly the side channel this system's closed,
-// indistinguishable failure set exists to close.
-func parseAgentID(raw string) (uuid.UUID, error) {
-	id, err := uuid.Parse(raw)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("%w: agent id is not a uuid: %v", auth.ErrNoBearerToken, err)
-	}
-	return id, nil
 }
 
 // --- register_agent -------------------------------------------------------
@@ -154,12 +139,12 @@ type registerAgentOut struct {
 func (h *handlers) registerAgent(ctx context.Context, req *mcp.CallToolRequest, in registerAgentIn) (*mcp.CallToolResult, registerAgentOut, error) {
 	token, err := bearerToken(req)
 	if err != nil {
-		return nil, registerAgentOut{}, err
+		return toolError(err), registerAgentOut{}, nil
 	}
 
 	raw, err := jsonMarshal(in.Descriptor)
 	if err != nil {
-		return nil, registerAgentOut{}, err
+		return toolError(err), registerAgentOut{}, nil
 	}
 
 	result, err := h.registration.Register(ctx, service.RegisterInput{
@@ -167,7 +152,7 @@ func (h *handlers) registerAgent(ctx context.Context, req *mcp.CallToolRequest, 
 		RawDescriptor:   raw,
 	})
 	if err != nil {
-		return nil, registerAgentOut{}, err
+		return toolError(err), registerAgentOut{}, nil
 	}
 
 	return nil, registerAgentOut{
@@ -185,7 +170,7 @@ type heartbeatIn struct {
 	// AgentID is a string, not uuid.UUID: this plan's research found that
 	// uuid.UUID's underlying [16]byte array infers an integer-array schema
 	// from the SDK's reflection-based generator, not a string one, and a real
-	// UUID string then fails schema validation. parseAgentID converts it.
+	// UUID string then fails schema validation. auth.AgentID converts it.
 	AgentID string `json:"agent_id" jsonschema:"the agent id returned by register_agent"`
 }
 
@@ -198,12 +183,12 @@ type heartbeatOut struct {
 func (h *handlers) heartbeatTool(ctx context.Context, req *mcp.CallToolRequest, in heartbeatIn) (*mcp.CallToolResult, heartbeatOut, error) {
 	token, err := bearerToken(req)
 	if err != nil {
-		return nil, heartbeatOut{}, err
+		return toolError(err), heartbeatOut{}, nil
 	}
 
-	agentID, err := parseAgentID(in.AgentID)
+	agentID, err := auth.AgentID(in.AgentID)
 	if err != nil {
-		return nil, heartbeatOut{}, err
+		return toolError(err), heartbeatOut{}, nil
 	}
 
 	result, err := h.heartbeat.Heartbeat(ctx, service.HeartbeatInput{
@@ -211,7 +196,7 @@ func (h *handlers) heartbeatTool(ctx context.Context, req *mcp.CallToolRequest, 
 		AgentToken: token,
 	})
 	if err != nil {
-		return nil, heartbeatOut{}, err
+		return toolError(err), heartbeatOut{}, nil
 	}
 
 	return nil, heartbeatOut{
@@ -237,17 +222,17 @@ type updateAgentOut struct {
 func (h *handlers) updateAgent(ctx context.Context, req *mcp.CallToolRequest, in updateAgentIn) (*mcp.CallToolResult, updateAgentOut, error) {
 	token, err := bearerToken(req)
 	if err != nil {
-		return nil, updateAgentOut{}, err
+		return toolError(err), updateAgentOut{}, nil
 	}
 
-	agentID, err := parseAgentID(in.AgentID)
+	agentID, err := auth.AgentID(in.AgentID)
 	if err != nil {
-		return nil, updateAgentOut{}, err
+		return toolError(err), updateAgentOut{}, nil
 	}
 
 	raw, err := jsonMarshal(in.Descriptor)
 	if err != nil {
-		return nil, updateAgentOut{}, err
+		return toolError(err), updateAgentOut{}, nil
 	}
 
 	result, err := h.update.Update(ctx, service.UpdateInput{
@@ -256,7 +241,7 @@ func (h *handlers) updateAgent(ctx context.Context, req *mcp.CallToolRequest, in
 		RawDescriptor: raw,
 	})
 	if err != nil {
-		return nil, updateAgentOut{}, err
+		return toolError(err), updateAgentOut{}, nil
 	}
 
 	return nil, updateAgentOut{Flags: jsonList(result.Flags), Changed: result.Changed}, nil
@@ -286,17 +271,17 @@ type agentOut struct {
 func (h *handlers) getAgent(ctx context.Context, req *mcp.CallToolRequest, in getAgentIn) (*mcp.CallToolResult, agentOut, error) {
 	token, err := bearerToken(req)
 	if err != nil {
-		return nil, agentOut{}, err
+		return toolError(err), agentOut{}, nil
 	}
 
-	agentID, err := parseAgentID(in.AgentID)
+	agentID, err := auth.AgentID(in.AgentID)
 	if err != nil {
-		return nil, agentOut{}, err
+		return toolError(err), agentOut{}, nil
 	}
 
 	agent, err := h.query.GetAgent(ctx, service.GetAgentInput{AgentID: agentID, Credential: token})
 	if err != nil {
-		return nil, agentOut{}, err
+		return toolError(err), agentOut{}, nil
 	}
 
 	return nil, toAgentOut(agent), nil
@@ -316,7 +301,7 @@ type searchAgentsOut struct {
 func (h *handlers) searchAgents(ctx context.Context, req *mcp.CallToolRequest, in searchAgentsIn) (*mcp.CallToolResult, searchAgentsOut, error) {
 	token, err := bearerToken(req)
 	if err != nil {
-		return nil, searchAgentsOut{}, err
+		return toolError(err), searchAgentsOut{}, nil
 	}
 
 	results, err := h.query.SearchAgents(ctx, service.SearchAgentsInput{
@@ -325,7 +310,7 @@ func (h *handlers) searchAgents(ctx context.Context, req *mcp.CallToolRequest, i
 		Limit:           in.Limit,
 	})
 	if err != nil {
-		return nil, searchAgentsOut{}, err
+		return toolError(err), searchAgentsOut{}, nil
 	}
 
 	out := searchAgentsOut{Agents: make([]agentOut, len(results))}

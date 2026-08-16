@@ -2,8 +2,11 @@ package auth
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // ErrNoBearerToken means the request carried no usable bearer credential: no
@@ -34,4 +37,19 @@ func BearerToken(header http.Header) (string, error) {
 		return "", ErrNoBearerToken
 	}
 	return token, nil
+}
+
+// AgentID parses raw as a UUID, refusing an unparseable one as
+// ErrNoBearerToken rather than a distinct error. This is the enumeration
+// oracle by another route: a caller who could tell "malformed id" apart from
+// "well-formed id, wrong credential" would learn that the id's shape is
+// checked before the credential is, and the difference becomes a probe. Both
+// internal/httpapi and internal/mcpapi route a malformed agent id through
+// this so their two 401s cannot diverge either.
+func AgentID(raw string) (uuid.UUID, error) {
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("%w: agent id is not a uuid: %v", ErrNoBearerToken, err)
+	}
+	return id, nil
 }
