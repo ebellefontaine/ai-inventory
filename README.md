@@ -2,11 +2,12 @@
 
 A single pane for every AI agent operating inside a business — what it does, who owns it, what it was built on, and where it runs.
 
-> **Status: phase 1 in development.** The repository is scaffolding today. The
-> quickstart and SDK examples below describe the intended interface, not
-> working software — nothing in this README runs yet. Follow
-> [SYSTEM.md](SYSTEM.md) for what is committed to and
-> [FUNCTIONAL.md](FUNCTIONAL.md) for the requirements being built against.
+> **Status: phase 1 in development.** The server and its CLI run today, and the
+> quickstart below is real: registration, heartbeats, and descriptor updates
+> work end to end. The SDK examples further down do not — they describe the
+> intended interface, and there is no UI yet. Follow [SYSTEM.md](SYSTEM.md) for
+> what is committed to and [FUNCTIONAL.md](FUNCTIONAL.md) for the requirements
+> being built against.
 
 ## The problem
 
@@ -17,15 +18,20 @@ Most organisations passed the point of knowing what agents they run somewhere ar
 **1. Run it.** One binary, one database.
 
 ```bash
-cp .env.example .env
-docker compose up -d
+docker compose up -d postgres
+export AIINV_DATABASE_URL='postgres://aiinv:aiinv@localhost:5432/aiinv?sslmode=disable'
+go build -o bin/aiinv ./cmd/aiinv
+./bin/aiinv serve
 ```
 
-The UI and API come up on <http://localhost:8080>. Schema migrations, the
-organisation, and the bootstrap administrator initialise on first run.
+The API comes up on <http://localhost:8080>. Schema migrations and the
+organisation initialise on first run, so there is no setup step between a
+connection string and a running server. `aiinv migrate` applies the schema on
+its own if you would rather move it deliberately.
 
-> Today `docker-compose.yml` defines only PostgreSQL. The `aiinv` service joins
-> it once there is a binary worth running.
+> Today `docker-compose.yml` defines only PostgreSQL, and there is no UI. A
+> published image and an `aiinv` service to run beside the database arrive with
+> packaging.
 
 **2. Mint an enrollment token.** Tokens are scoped to exactly one team and one
 environment. Agents inherit ownership from the token rather than claiming it in
@@ -33,10 +39,13 @@ the payload, which is what makes the inventory defensible rather than
 self-reported.
 
 ```bash
-aiinv token create --team finance-platform --env production
+export AIINV_TOKEN=$(aiinv token create --team finance-platform --env production)
 ```
 
-The token value is shown exactly once.
+The token value is shown exactly once — only its hash is stored, so it cannot
+be recovered. It is written to stdout on its own and everything else goes to
+stderr, which is why the capture above gets the token and nothing else. The
+team is created on first mention.
 
 **3. Register an agent.**
 
@@ -44,8 +53,13 @@ The token value is shown exactly once.
 curl -X POST http://localhost:8080/api/v1/agents:register \
   -H "Authorization: Bearer $AIINV_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"name": "invoice-triage", "description": "Triages accounts-payable invoices"}'
+  -d '{"name": "invoice-triage", "purpose": "Triages accounts-payable invoices"}'
 ```
+
+The response carries the agent's id and a credential of its own, which is what
+it heartbeats and PATCHes with from then on. Its team and environment come from
+the token; anything the payload says about its own ownership is recorded as
+evidence and ignored.
 
 ## From an agent
 
