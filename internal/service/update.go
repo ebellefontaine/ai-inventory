@@ -8,13 +8,11 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/ebellefontaine/ai-inventory/internal/auth"
 	"github.com/ebellefontaine/ai-inventory/internal/domain"
 )
 
@@ -134,7 +132,7 @@ func (s *UpdateService) Update(ctx context.Context, in UpdateInput) (UpdateResul
 	// refused update writes nothing at all.
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := authenticateAgent(ctx, tx, in.AgentID, in.AgentToken); err != nil {
+	if _, err := authenticateAgent(ctx, tx, in.AgentID, in.AgentToken, "update agent"); err != nil {
 		return UpdateResult{}, err
 	}
 
@@ -473,45 +471,6 @@ func mergeAttributes(stored []byte, incoming map[string]json.RawMessage) ([]byte
 	return json.Marshal(merged)
 }
 
-// authenticateAgent repeats the check HeartbeatService makes, deliberately.
-//
-// The two operations have to agree on what a valid credential is, and the
-// sentinels are shared so a caller cannot tell them apart by which error it got.
-// Extracting it into a helper the heartbeat also called would be the better
-// shape; that is a change to heartbeat.go, and it belongs in a commit that says
-// so rather than smuggled into this one.
-func authenticateAgent(ctx context.Context, tx pgx.Tx, agentID uuid.UUID, token string) error {
-	var (
-		credentialID uuid.UUID
-		ownerID      uuid.UUID
-		expiresAt    *time.Time
-		revokedAt    *time.Time
-	)
-	err := tx.QueryRow(ctx, resolveCredentialSQL, auth.HashToken(token)).Scan(
-		&credentialID, &ownerID, &expiresAt, &revokedAt,
-	)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return ErrCredentialNotFound
-	case err != nil:
-		return fmt.Errorf("update agent: resolve credential: %w", err)
-	}
-
-	// Revocation ahead of expiry, and both ahead of the ownership mismatch, in
-	// the same order the heartbeat reports them: an operator who deliberately
-	// killed a credential wants to see that rather than the incidental fact that
-	// it also aged out.
-	switch {
-	case revokedAt != nil:
-		return ErrCredentialRevoked
-	case expiresAt != nil && !expiresAt.After(time.Now()):
-		return ErrCredentialExpired
-	case ownerID != agentID:
-		return ErrCredentialAgentMismatch
-	}
-	return nil
-}
-
 func readAgentForUpdate(ctx context.Context, tx pgx.Tx, agentID uuid.UUID) (storedAgent, error) {
 	var a storedAgent
 	err := tx.QueryRow(ctx, readAgentForUpdateSQL, agentID).Scan(
@@ -567,8 +526,8 @@ SELECT org_id, instance_key, human_edited_fields, flags,
 // retired and quarantined are left exactly alone. They are human decisions: an
 // agent that keeps reporting after being retired is precisely what an operator
 // needs to see, and a quarantined agent must not be able to release itself by
-// continuing to run. The CASE mirrors the one in registerAgentSQL and
-// recordHeartbeatSQL, for the same reasons.
+// continuing to run. The CASE mirrors the one in the store's agent upsert and
+// in recordHeartbeatSQL, for the same reasons.
 //
 // The prior snapshot is read in the same statement as the update, so it is the
 // state this write replaced and not merely the state at some earlier moment.

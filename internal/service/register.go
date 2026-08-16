@@ -161,19 +161,14 @@ func (s *RegistrationService) Register(ctx context.Context, in RegisterInput) (R
 		return RegisterResult{}, fmt.Errorf("register agent: %w", err)
 	}
 
-	var (
-		agentID uuid.UUID
-		created bool
-		after   []byte
-	)
-	err = tx.QueryRow(ctx, registerAgentSQL,
-		agent.OrgID, agent.TeamID, agent.InstanceKey, agent.Environment,
-		agent.DisplayName, agent.Purpose,
-		agent.Platform, agent.Hosting, agent.Source, agent.Telemetry, agent.Attributes, agent.Flags,
-	).Scan(&agentID, &created, &after)
+	// The upsert is the store's, issued on this service's transaction rather
+	// than on the pool. The human-edit guard that makes OWN-4 true lives in that
+	// one statement, so self-registration cannot drift away from it.
+	upserted, err := db.UpsertTx(ctx, tx, agent)
 	if err != nil {
 		return RegisterResult{}, fmt.Errorf("register agent: upsert: %w", err)
 	}
+	agentID, created, after := upserted.ID, upserted.Created, upserted.Snapshot
 
 	if _, err := tx.Exec(ctx, issueCredentialSQL, agentID, credentialHash); err != nil {
 		return RegisterResult{}, fmt.Errorf("register agent: issue credential: %w", err)
@@ -362,72 +357,6 @@ const readAgentSnapshotSQL = `
 SELECT to_jsonb(a)
 FROM agents a
 WHERE a.org_id = $1 AND a.environment = $2 AND a.instance_key = $3;
-`
-
-// registerAgentSQL is db.AgentStore's upsert, issued on this service's
-// transaction instead of on the pool.
-//
-// The duplication is deliberate and is the narrowest way to get atomicity
-// without touching internal/db. AgentStore.Upsert holds a *pgxpool.Pool, so
-// calling it takes a different connection than the transaction this service
-// opened, and the agent row would commit independently of the credential,
-// revision, and audit rows that must accompany it. A registration that creates
-// an agent and then fails to issue a credential leaves an agent that can never
-// heartbeat — it goes idle, then stale, while running perfectly.
-//
-// The alternative was to add a transaction-aware path to internal/db, which is
-// the better long-term answer and belongs in a change to that package rather
-// than smuggled in here. When that arrives, this constant should be deleted and
-// this call should become a store method taking the transaction.
-//
-// Until then the risk is drift: a change to the human-edit guard in
-// internal/db/agents.go that is not mirrored here would silently undo OWN-4 for
-// self-registration. TestRegisterPreservesHumanEditedFields exists to catch
-// exactly that, by asserting the guarantee through Register rather than through
-// the store.
-//
-// Beyond the ON CONFLICT clause it differs from the original in one way: it
-// also returns the stored row as JSON, which becomes both the revision snapshot
-// and the audit entry's "after". Taking the snapshot from the row the database
-// actually holds — rather than from the values Go sent — means it reflects
-// server-managed columns and any human-edited field the guard preserved, so a
-// reconstruction from revisions is faithful rather than aspirational.
-const registerAgentSQL = `
-INSERT INTO agents (
-    org_id, team_id, instance_key, environment,
-    display_name, purpose,
-    platform, hosting, source, telemetry_links, attributes, flags
-) VALUES (
-    $1, $2, $3, $4, $5, $6,
-    COALESCE($7,'{}')::jsonb, COALESCE($8,'{}')::jsonb, COALESCE($9,'{}')::jsonb,
-    COALESCE($10,'[]')::jsonb, COALESCE($11,'{}')::jsonb,
-    COALESCE($12::text[],'{}')
-)
-ON CONFLICT (org_id, environment, instance_key) DO UPDATE SET
-    team_id = CASE WHEN 'team_id' = ANY(agents.human_edited_fields)
-                   THEN agents.team_id ELSE EXCLUDED.team_id END,
-    display_name = CASE WHEN 'display_name' = ANY(agents.human_edited_fields)
-                        THEN agents.display_name ELSE EXCLUDED.display_name END,
-    purpose = CASE WHEN 'purpose' = ANY(agents.human_edited_fields)
-                   THEN agents.purpose ELSE EXCLUDED.purpose END,
-    platform = CASE WHEN 'platform' = ANY(agents.human_edited_fields)
-                    THEN agents.platform ELSE EXCLUDED.platform END,
-    hosting = CASE WHEN 'hosting' = ANY(agents.human_edited_fields)
-                   THEN agents.hosting ELSE EXCLUDED.hosting END,
-    source = CASE WHEN 'source' = ANY(agents.human_edited_fields)
-                  THEN agents.source ELSE EXCLUDED.source END,
-    telemetry_links = CASE WHEN 'telemetry_links' = ANY(agents.human_edited_fields)
-                           THEN agents.telemetry_links ELSE EXCLUDED.telemetry_links END,
-    attributes = CASE WHEN 'attributes' = ANY(agents.human_edited_fields)
-                      THEN agents.attributes ELSE EXCLUDED.attributes END,
-    flags           = EXCLUDED.flags,
-    lifecycle_state = CASE
-        WHEN agents.lifecycle_state IN ('idle','stale') THEN 'active'
-        ELSE agents.lifecycle_state
-    END,
-    last_heartbeat_at = now(),
-    updated_at        = now()
-RETURNING id, (xmax = 0) AS created, to_jsonb(agents) AS snapshot;
 `
 
 // A new row per registration, never a reused one. Twenty replicas of one

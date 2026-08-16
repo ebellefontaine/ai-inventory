@@ -26,6 +26,13 @@ type UpsertAgentInput struct {
 type UpsertAgentResult struct {
 	ID      uuid.UUID
 	Created bool
+	// Snapshot is the stored row as JSON, exactly as the database holds it
+	// after the statement. It is what a revision and an audit entry's "after"
+	// are built from: taking it from the row rather than from the values Go
+	// sent means it reflects the server-managed columns and any human-edited
+	// field the guard preserved, so a reconstruction from revisions is faithful
+	// rather than aspirational.
+	Snapshot []byte
 }
 
 type AgentStore struct{ pool *pgxpool.Pool }
@@ -67,11 +74,27 @@ ON CONFLICT (org_id, environment, instance_key) DO UPDATE SET
     END,
     last_heartbeat_at = now(),
     updated_at        = now()
-RETURNING id, (xmax = 0) AS created;
+RETURNING id, (xmax = 0) AS created, to_jsonb(agents) AS snapshot;
 `
 
-// Upsert registers or updates an agent. It is idempotent on
-// (org_id, environment, instance_key) and safe under concurrency.
+// Upsert registers or updates an agent on the store's pool.
+//
+// It is the standalone path, for a caller with nothing else to write: one
+// statement is already atomic on its own. A caller that must write other rows
+// alongside the agent — a credential, a revision, an audit entry — calls
+// UpsertTx with its own transaction instead. Both issue upsertAgentSQL, which
+// is what keeps the human-edit guard below true of every path into this table.
+func (s *AgentStore) Upsert(ctx context.Context, in UpsertAgentInput) (UpsertAgentResult, error) {
+	out, err := UpsertTx(ctx, s.pool, in)
+	if err != nil {
+		return UpsertAgentResult{}, fmt.Errorf("upsert agent: %w", err)
+	}
+	return out, nil
+}
+
+// UpsertTx registers or updates an agent on whichever executor the caller
+// supplies. It is idempotent on (org_id, environment, instance_key) and safe
+// under concurrency.
 //
 // The (xmax = 0) expression is a PostgreSQL idiom for "this row was inserted
 // rather than updated by this statement" — xmax is zero on a fresh insert.
@@ -100,15 +123,19 @@ RETURNING id, (xmax = 0) AS created;
 //
 // Flags binds through COALESCE($12::text[],'{}') because a nil []string binds
 // as SQL NULL, which a NOT NULL column rejects.
-func (s *AgentStore) Upsert(ctx context.Context, in UpsertAgentInput) (UpsertAgentResult, error) {
+//
+// The error is returned unwrapped. Each caller is a different operation to the
+// operator reading the log — a standalone upsert, a registration — and wraps it
+// with the name of the one it is.
+func UpsertTx(ctx context.Context, tx DBTX, in UpsertAgentInput) (UpsertAgentResult, error) {
 	var out UpsertAgentResult
-	err := s.pool.QueryRow(ctx, upsertAgentSQL,
+	err := tx.QueryRow(ctx, upsertAgentSQL,
 		in.OrgID, in.TeamID, in.InstanceKey, in.Environment,
 		in.DisplayName, in.Purpose,
 		in.Platform, in.Hosting, in.Source, in.Telemetry, in.Attributes, in.Flags,
-	).Scan(&out.ID, &out.Created)
+	).Scan(&out.ID, &out.Created, &out.Snapshot)
 	if err != nil {
-		return UpsertAgentResult{}, fmt.Errorf("upsert agent: %w", err)
+		return UpsertAgentResult{}, err
 	}
 	return out, nil
 }

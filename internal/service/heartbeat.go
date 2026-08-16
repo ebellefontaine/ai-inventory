@@ -4,40 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/ebellefontaine/ai-inventory/internal/auth"
 	"github.com/ebellefontaine/ai-inventory/internal/domain"
-)
-
-// The four failure modes below are distinguished for audit and operator
-// diagnostics only: an administrator chasing a fleet that has gone quiet needs
-// to know whether a credential was revoked, has expired, never existed, or is
-// being presented for the wrong agent.
-//
-// The HTTP layer in Task 20 must collapse all four into one indistinguishable
-// 401. A caller who can tell "revoked" from "not found" has a
-// credential-enumeration oracle: they can confirm which guessed credentials are
-// real, which is precisely the information a brute-force search needs and the
-// response must not carry. ErrCredentialAgentMismatch leaks more than the
-// others if returned — it confirms a credential is valid while naming the agent
-// it is not valid for — so it must be collapsed with the rest rather than
-// treated as the "safe" one to report.
-var (
-	// ErrCredentialNotFound means no credential with that hash exists.
-	ErrCredentialNotFound = errors.New("agent credential not found")
-	// ErrCredentialRevoked means the credential exists but an operator killed it.
-	ErrCredentialRevoked = errors.New("agent credential revoked")
-	// ErrCredentialExpired means the credential exists but is past its expires_at.
-	ErrCredentialExpired = errors.New("agent credential expired")
-	// ErrCredentialAgentMismatch means the credential is valid but belongs to a
-	// different agent than the one the heartbeat names. Without this check, any
-	// agent in the installation could keep any other agent looking alive.
-	ErrCredentialAgentMismatch = errors.New("agent credential belongs to a different agent")
 )
 
 // livenessWindowIntervals is how many heartbeat intervals a credential may go
@@ -136,35 +108,13 @@ func (s *HeartbeatService) Heartbeat(ctx context.Context, in HeartbeatInput) (He
 	// refused heartbeat writes nothing at all.
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var (
-		credentialID uuid.UUID
-		agentID      uuid.UUID
-		expiresAt    *time.Time
-		revokedAt    *time.Time
-	)
-	err = tx.QueryRow(ctx, resolveCredentialSQL, auth.HashToken(in.AgentToken)).Scan(
-		&credentialID, &agentID, &expiresAt, &revokedAt,
-	)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return HeartbeatResult{}, ErrCredentialNotFound
-	case err != nil:
-		return HeartbeatResult{}, fmt.Errorf("heartbeat: resolve credential: %w", err)
+	credentialID, err := authenticateAgent(ctx, tx, in.AgentID, in.AgentToken, "heartbeat")
+	if err != nil {
+		return HeartbeatResult{}, err
 	}
-
-	// Revocation is reported ahead of expiry, and both ahead of the ownership
-	// mismatch. An operator who deliberately killed a credential wants to see
-	// that rather than the incidental fact that it also aged out, and a
-	// credential that is dead in its own right is not worth reporting as
-	// somebody else's.
-	switch {
-	case revokedAt != nil:
-		return HeartbeatResult{}, ErrCredentialRevoked
-	case expiresAt != nil && !expiresAt.After(time.Now()):
-		return HeartbeatResult{}, ErrCredentialExpired
-	case agentID != in.AgentID:
-		return HeartbeatResult{}, ErrCredentialAgentMismatch
-	}
+	// Past the check the credential's agent and the claimed agent are the same
+	// id, so the beat is recorded against in.AgentID.
+	agentID := in.AgentID
 
 	if _, err := tx.Exec(ctx, touchCredentialSQL, credentialID); err != nil {
 		return HeartbeatResult{}, fmt.Errorf("heartbeat: record credential liveness: %w", err)
@@ -197,18 +147,6 @@ func (s *HeartbeatService) Heartbeat(ctx context.Context, in HeartbeatInput) (He
 	}, nil
 }
 
-// The lookup is by hash alone, and deliberately does not filter on revoked_at,
-// expires_at, or agent_id in SQL. A query that returned no row for a revoked
-// credential could not tell the audit trail apart from a credential that never
-// existed, and that distinction is the whole point of the sentinel errors. The
-// same goes for the ownership check: filtering on agent_id here would report a
-// stolen credential as one that does not exist.
-const resolveCredentialSQL = `
-SELECT id, agent_id, expires_at, revoked_at
-FROM agent_credentials
-WHERE token_hash = $1;
-`
-
 // One credential, one replica. This is the row that makes the replica count
 // observable: without it the server would have to take the agent's word for how
 // many copies of itself are running.
@@ -231,7 +169,8 @@ UPDATE agent_credentials SET last_seen_at = now() WHERE id = $1;
 // are human decisions and are left exactly alone: an agent that keeps
 // heartbeating after being retired is precisely what an operator needs to see,
 // and a quarantined agent must not be able to release itself by continuing to
-// run. The CASE mirrors the one in registerAgentSQL, for the same reasons.
+// run. The CASE mirrors the one in the store's agent upsert, for the same
+// reasons.
 //
 // updated_at is not touched. It marks a change to what the record says, and a
 // heartbeat changes only what the server has observed; bumping it every
