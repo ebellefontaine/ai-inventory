@@ -111,9 +111,19 @@ func newApp(ctx context.Context, cfg config.Config, logger *slog.Logger) (*app, 
 	query := service.NewQueryService(pool, tokens)
 
 	mcpServer := mcpapi.NewServer(registration, heartbeat, update, query)
+	// Logger and MaxRequestBodyBytes are set explicitly rather than left at
+	// their zero values, which would otherwise give /mcp no access log and a
+	// 4 MiB unauthenticated body budget instead of the REST API's deliberate
+	// 64 KiB (httpapi.MaxBodyBytes). Reusing that constant, rather than a
+	// second literal, is what keeps the two surfaces' body limits from
+	// silently drifting apart.
 	mcpHandler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return mcpServer },
-		&mcp.StreamableHTTPOptions{Stateless: true},
+		&mcp.StreamableHTTPOptions{
+			Stateless:           true,
+			Logger:              logger,
+			MaxRequestBodyBytes: httpapi.MaxBodyBytes,
+		},
 	)
 
 	mux := http.NewServeMux()
