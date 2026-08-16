@@ -23,11 +23,7 @@ import (
 // exact same types by re-declaring them (an unexported type cannot cross a
 // package boundary), and reuses the exact same JSON, unmodified.
 func TestConformance(t *testing.T) {
-	raw, err := os.ReadFile("../../spec/conformance/cases.json")
-	require.NoError(t, err, "read contract fixture set")
-
-	var suite conformanceSuite
-	require.NoError(t, json.Unmarshal(raw, &suite), "parse contract fixture set")
+	suite := loadMCPConformanceSuite(t)
 	require.NotEmpty(t, suite.Cases, "the contract suite must not be empty")
 
 	for _, c := range suite.Cases {
@@ -35,6 +31,30 @@ func TestConformance(t *testing.T) {
 			runMCPContractCase(t, c)
 		})
 	}
+}
+
+// TestConformanceKnownGaps is the MCP counterpart to
+// internal/httpapi/contract_test.go's test of the same name: it surfaces
+// every acceptance criterion the shared fixture cannot yet exercise, as a
+// named, visible skip on this surface too, rather than letting the MCP
+// runner silently say nothing about a gap the HTTP runner already declares.
+func TestConformanceKnownGaps(t *testing.T) {
+	suite := loadMCPConformanceSuite(t)
+	for _, gap := range suite.KnownGaps {
+		t.Run(gap.Requirement, func(t *testing.T) {
+			t.Skip(gap.Description)
+		})
+	}
+}
+
+func loadMCPConformanceSuite(t *testing.T) conformanceSuite {
+	t.Helper()
+	raw, err := os.ReadFile("../../spec/conformance/cases.json")
+	require.NoError(t, err, "read contract fixture set")
+
+	var suite conformanceSuite
+	require.NoError(t, json.Unmarshal(raw, &suite), "parse contract fixture set")
+	return suite
 }
 
 type conformanceSuite struct {

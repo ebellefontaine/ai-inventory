@@ -170,8 +170,34 @@ func TestSearchAgentsTool(t *testing.T) {
 	require.Len(t, out.Agents, 1)
 }
 
+// TestNewServerRegistersAllFiveTools proves the five tools NewServer wires up
+// are actually reachable over a real session, not just that NewServer
+// returns a non-nil *mcp.Server -- a server with zero tools registered is
+// also non-nil. This reuses newMCPContractFixture's real
+// mcp.NewStreamableHTTPHandler + httptest.NewServer set-up from
+// contract_test.go rather than duplicating it.
 func TestNewServerRegistersAllFiveTools(t *testing.T) {
-	f := newMCPFixture(t)
-	server := NewServer(f.registration, f.heartbeat, f.update, f.query)
-	require.NotNil(t, server)
+	f := newMCPContractFixture(t)
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "list-tools-test", Version: "v0.0.0"}, nil)
+	transport := &mcp.StreamableClientTransport{Endpoint: f.url}
+	session, err := client.Connect(context.Background(), transport, nil)
+	require.NoError(t, err)
+	defer session.Close()
+
+	result, err := session.ListTools(context.Background(), nil)
+	require.NoError(t, err)
+
+	names := make([]string, len(result.Tools))
+	for i, tool := range result.Tools {
+		names[i] = tool.Name
+	}
+
+	require.ElementsMatch(t, []string{
+		"register_agent",
+		"heartbeat",
+		"update_agent",
+		"get_agent",
+		"search_agents",
+	}, names)
 }
