@@ -146,6 +146,43 @@ func TestSearchAgentsRefusesAnInvalidLifecycleFilter(t *testing.T) {
 	require.ErrorIs(t, err, service.ErrInvalidLifecycleState)
 }
 
+// TestSearchAgentsLimitDefaultsAndClamps proves the two branches of
+// SearchAgents's Limit handling that no existing test exercised: a
+// zero-or-negative Limit falls back to the default rather than returning no
+// rows, and a Limit above the maximum does not wrongly truncate a normal-
+// sized result below what actually exists.
+func TestSearchAgentsLimitDefaultsAndClamps(t *testing.T) {
+	f := newQueryFixture(t)
+	ctx := context.Background()
+
+	registration := service.NewRegistrationService(f.pool, service.NewTokenService(f.pool), 60)
+	_, err := registration.Register(ctx, service.RegisterInput{
+		EnrollmentToken: f.enrollment,
+		RawDescriptor:   []byte(`{"name":"Second worker","purpose":"Processes more jobs","instance_key":"query-fixture-2"}`),
+	})
+	require.NoError(t, err)
+
+	// Zero falls back to the default (50), which is well above the two
+	// agents registered for this test -- so a non-empty result proves the
+	// default kicked in rather than Limit: 0 meaning "return nothing".
+	zero, err := f.queries.SearchAgents(ctx, service.SearchAgentsInput{EnrollmentToken: f.enrollment, Limit: 0})
+	require.NoError(t, err)
+	require.NotEmpty(t, zero)
+
+	// A negative Limit must behave the same as zero: fall back to the
+	// default, not error and not return zero rows.
+	negative, err := f.queries.SearchAgents(ctx, service.SearchAgentsInput{EnrollmentToken: f.enrollment, Limit: -5})
+	require.NoError(t, err)
+	require.Equal(t, len(zero), len(negative))
+
+	// A Limit far above the 200 clamp must not restrict the result below
+	// what actually exists: the clamp bounds an oversized request, it does
+	// not truncate a normal-sized one.
+	high, err := f.queries.SearchAgents(ctx, service.SearchAgentsInput{EnrollmentToken: f.enrollment, Limit: 1000})
+	require.NoError(t, err)
+	require.Len(t, high, 2)
+}
+
 func TestSearchAgentsRequiresAnEnrollmentTokenNotAnAgentCredential(t *testing.T) {
 	f := newQueryFixture(t)
 
