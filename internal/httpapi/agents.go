@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/ebellefontaine/ai-inventory/internal/auth"
 	"github.com/ebellefontaine/ai-inventory/internal/service"
 )
 
@@ -55,7 +56,7 @@ type updateResponse struct {
 // transaction that writes. The read is bounded by MaxBodyBytes, so an
 // unauthenticated caller can cost this process 64 KiB and no more.
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
-	token, err := bearerToken(r)
+	token, err := auth.BearerToken(r.Header)
 	if err != nil {
 		respondError(w, r, s.logger, err)
 		return
@@ -105,7 +106,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 // do with whether the agent is alive — which is the one thing this endpoint is
 // for. An empty body therefore succeeds because there is nothing to be empty.
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
-	token, err := bearerToken(r)
+	token, err := auth.BearerToken(r.Header)
 	if err != nil {
 		respondError(w, r, s.logger, err)
 		return
@@ -135,7 +136,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 // handleUpdate applies a partial descriptor to a record that already exists.
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
-	token, err := bearerToken(r)
+	token, err := auth.BearerToken(r.Header)
 	if err != nil {
 		respondError(w, r, s.logger, err)
 		return
