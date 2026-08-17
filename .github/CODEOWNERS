@@ -1,0 +1,11 @@
+# Code owners for AI Inventory.
+#
+# This file controls who is requested for review, and (combined with the
+# main branch's protection rules) whose approval is required before a pull
+# request can merge. See CONTRIBUTING.md for the contribution workflow.
+#
+# Order matters: the last matching pattern in this file wins, so more
+# specific rules should follow more general ones. A single top-level rule is
+# enough for a repository with one maintainer.
+
+* @ebellefontaine
